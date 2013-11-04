@@ -3,6 +3,7 @@
 #include <boost/python.hpp>
 #include "boost/python/extract.hpp"
 #include <iostream>
+#include <fstream>
 
 using namespace boost::python;
 using namespace std;
@@ -14,19 +15,25 @@ class nbody {
   int Nparticles;
   int nSteps;
   float dt;
+  float Temperature;
   int nProme;
-  struct ParticleSystemType { float *x, *y, *z, *vx, *vy, *vz, *fx, *fy, *fz; };
+  //struct ParticleSystemType { float *x, *y, *z, *vx, *vy, *vz, *fx, *fy, *fz; };
+  struct ParticleSystemType { float *x, *y, *z, *vx, *vy, *vz; };
   float box_sizeX, box_sizeY, box_sizeZ;
   float m_hiX,m_hiY,m_hiZ;
   float m_loX,m_loY,m_loZ;
+  string boxfilename;
+  float *buf;
+
 
 	// Demonstrate extracting a derived object type that is built-in to Boost
 	public: 
-    void setSimulation(int N, int nSteps, float dt, int nProme) {
+    void setSimulation(int N, int nSteps, float dt, int nProme, float T) {
       this->Nparticles = N;
       this->nSteps = nSteps;
       this->dt = dt;
       this->nProme = nProme;
+      this->Temperature = T;
     }
   
     void setBox(float Lx, float Ly, float Lz) {
@@ -40,36 +47,84 @@ class nbody {
       this->m_hiZ = Lz/2.0;
       this->m_loZ = -(this->m_hiZ);
     }
+
+    void printParams() {
+      cout << "+++++++++++++++++++++++++++++++++++++++++++++"<< endl;
+      cout << "Numero de particulas: " << this->Nparticles << endl;
+      cout << "Numero de pasos: " << this->nSteps << endl;
+      cout << "Delta T: " << this->dt << endl;
+      cout << "Numero de promedios: " << this->nProme << endl;
+      cout << "Caja (Lx,Ly,Lz): " << this->box_sizeX << "," 
+        << this->box_sizeY << "," << this->box_sizeZ << endl;
+      cout << "+++++++++++++++++++++++++++++++++++++++++++++" << endl;
+    }
+
+    void setBoxFilename(string s) {
+      boxfilename = s;
+    }
+
+    void read_box() {
+      cout << "Reading box from file: " << boxfilename << endl;
+      ifstream BoxConfigFile;
+      BoxConfigFile.open(boxfilename.c_str(), ifstream::in); // input
+      if(!BoxConfigFile) {
+        printf("Cannot open Box Config file: %s\n",boxfilename.c_str());
+        exit(15);
+      }
+      BoxConfigFile >> this->Nparticles;
+      BoxConfigFile >> this->box_sizeX;
+      BoxConfigFile >> this->box_sizeY;
+      BoxConfigFile >> this->box_sizeZ;
+      int NP = this->Nparticles;
+      long int size_mem = 9*(NP)*sizeof(float);
+      ParticleSystemType p;
+      buf = (float*) malloc(size_mem);
+      if(buf==NULL){
+        cout << "Error en el alojamiento" << endl;
+        exit(15);
+      } 
+      p.x = buf + 0*NP; p.y = buf + 1*NP; p.z = buf + 2*NP;
+      p.vx = buf + 3*NP; p.vy = buf + 4*NP; p.vz = buf + 5*NP;
+      //p.fx = buf + 6*NP; p.vy = buf + 7*NP; p.vz = buf + 8*NP;
+      cout << "Alojando: " <<  size_mem/1024 << " kb" << " para " << NP << " particulas" << endl;
+      for( int i = 0; i < NP; i++ ){
+        BoxConfigFile >> p.x[i];
+        BoxConfigFile >> p.y[i];
+        BoxConfigFile >> p.z[i];
+        BoxConfigFile >> p.vx[i];
+        BoxConfigFile >> p.vy[i];
+        BoxConfigFile >> p.vz[i];
+      }
+      BoxConfigFile.close();
+    }
+
+    
     
     //realiza benchamark de unistride
 	  int unitstride(){
       int NP = this->Nparticles;
       float boxLx = this->box_sizeX;
       float boxLy = this->box_sizeY;
-      float boxLz = this->box_sizeZ;
+      float boxLz = this->box_sizeZ; 
+      float scale, TemperatureInstant;     
 
       // Particle data stored as an array of structures
-      ParticleSystemType p; // Particle system stored as a structure of arrays
-      float *buf = (float*) malloc(9*NP*sizeof(float)); // Malloc all data
+      ParticleSystemType p;
       p.x = buf+0*NP; p.y = buf+1*NP; p.z = buf+2*NP;
       p.vx = buf+3*NP; p.vy = buf+4*NP; p.vz = buf+5*NP;
-      p.fx = buf+6*NP; p.fy = buf+7*NP; p.fz = buf+8*NP;
+      //p.fx = buf+6*NP; p.fy = buf+7*NP; p.fz = buf+8*NP;
+      cout << "ultima particula: " << p.vx[NP -1] << "," << p.vy[NP -1] << "," << p.vz[NP -1] << "\n" ;
 
-      // Initialize particles
-      VSLStreamStatePtr rnStream;
-      vslNewStream( &rnStream, VSL_BRNG_MT19937, 1 );
-      vsRngUniform(VSL_RNG_METHOD_UNIFORM_STD, rnStream, 9*NP, buf, -this->box_sizeX, this->box_sizeX);
 
       // Propagate particles
       printf("Propagating particles using %d threads...\n", omp_get_max_threads());
-      cout << "Steps | Total Energy | Kinetic Energy | Potential Energy | InstantTemperature" << endl;
+      cout << "Steps | Total Energy | Kinetic Energy | Potential Energy | forceX | ForceY | ForceZ" << endl;
 
       for (int step = 1; step <= nSteps; step++) {
         float Pot_energy = 0.0f;
 
-        #pragma omp parallel for schedule(static) private (Pot_energy)
+        // #pragma omp parallel for schedule(static) private (Pot_energy)
         for (int i = 0; i < NP; i++) { 
-          // float Fx = 0.0f; float Fy = 0.0f; float Fz = 0.0f; // Components of force on particle i
           float fxi=0.0f; 
           float fyi=0.0f; 
           float fzi=0.0f;
@@ -97,61 +152,60 @@ class nbody {
               const float pot = 4.0*invrij6*(invrij6 - 1.0);
               Pot_energy =  pot + Pot_energy;
               const float force = 24.0*invrij6*( 2.0*invrij6 - 1.0 )*invrij2;
-             // const float drSquared = dx*dx + dy*dy + dz*dz;
-             // const float drPowerN32 = 1.0f/(drSquared*sqrtf(drSquared));
 
               fxi += force*dx;
               fyi += force*dy;
               fzi += force*dz;
-              // Reduction to calculate the net force
-              //Fx += dx * drPowerN32; Fy += dy * drPowerN32; Fz += dz * drPowerN32;
             }             
           }
-          if(i==1000) cout << "pot: " << Pot_energy << endl;
-          p.vx[i] += fxi*0.5*this->dt;
-          p.vy[i] += fyi*0.5*this->dt;
-          p.vz[i] += fzi*0.5*this->dt;
-         // pBox.VelX[i] = pBox.VelX[i] + pBox.ForceX[i]*0.5*DeltaT;
+          // cout << "fxi: " << fxi<< "\n";
+          p.vx[i] = fxi*0.5*this->dt;
+          p.vy[i] = fyi*0.5*this->dt;
+          p.vz[i] = fzi*0.5*this->dt;
            
-          // Move particles in response to the gravitational force
-//          p.vx[i] += this->dt*Fx; p.vy[i] += this->dt*Fy; p.vz[i] += this->dt*Fz;
         }
+
         float kinetic_energy = 0.0f;
+        float sumaX = 0.0;
+        float sumaY = 0.0;
+        float sumaZ = 0.0;
         #pragma unroll
         for (int i = 0 ; i < NP; i++) { // Not much work, serial loop
           p.x[i] += p.vx[i]*this->dt; 
           p.y[i] += p.vy[i]*this->dt; 
           p.z[i] += p.vz[i]*this->dt;
 
-          if(p.x[i] > this->box_sizeX){
-            p.x[i]=p.x[i] - this->box_sizeX;
-          }else if(p.x[i] < 0.0){
-            p.x[i]=p.x[i] + this->box_sizeX;
-          }
-          if(p.y[i] > this->box_sizeY){
-            p.y[i]=p.y[i] - this->box_sizeY;
-          }else if(p.y[i] < 0.0){
-            p.y[i]=p.y[i] + this->box_sizeY;
-          }
-          if(p.z[i] > this->box_sizeZ){
-            p.z[i]=p.z[i] - this->box_sizeZ;
-          }else if(p.z[i] < 0.0){
-            p.z[i]=p.z[i] + this->box_sizeZ;
-          }
-
           kinetic_energy += p.vx[i]*p.vx[i]+p.y[i]*p.vy[i]+p.vz[i]*p.vz[i];
         }
+
+        kinetic_energy = 0.5*kinetic_energy;
+        TemperatureInstant = (2.0*kinetic_energy) / (3.0*(NP-3));
+        scale = sqrt((double)(Temperature/TemperatureInstant));
+        
+        #pragma unroll  
+        for(int i=0; i < NP; i++ ){
+          p.vx[i] = scale*p.vx[i];
+          p.vy[i] = scale*p.vy[i];
+          p.vz[i] = scale*p.vz[i];
+        }
+
         if(step%this->nProme == 0){          
           cout.precision(6);
           cout << step << "\t"
-            << (kinetic_energy+Pot_energy)/NP << "\t"
-            << kinetic_energy/NP << "\t"
-            << Pot_energy/NP << "\n";
+            // << (kinetic_energy+Pot_energy)/NP << "\t"
+            // << kinetic_energy/NP << "\t"
+            // << Pot_energy/NP << "\t"
+            << (kinetic_energy+Pot_energy) << "\t"
+            << kinetic_energy << "\t"
+            << Pot_energy << "\t"
+            << sumaX << "\t"
+            << sumaY << "\t"
+            << sumaZ << "\n";
           // printf("%d  %.4f\n",step,kinetic_energy);
           // fflush(stdout);
         }
       }
-      free(buf);
+      //free(buf);
       return 0;
     }
 };
@@ -162,6 +216,9 @@ BOOST_PYTHON_MODULE(NbodyBench) {
 		.def("setSimulation", &nbody::setSimulation)
 		.def("setBox", &nbody::setBox)
 		.def("unitstride", &nbody::unitstride)
+    .def("printParams", &nbody::printParams)
+    .def("setBoxFilename", &nbody::setBoxFilename)
+    .def("read_box", &nbody::read_box)
 	;
 	
 }
